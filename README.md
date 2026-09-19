@@ -22,8 +22,7 @@ boundary, enforced on the server.
 
 ## What "agentic RAG" means here
 
-This isn't an LLM wrapper — there's no call out to GPT, Claude, or any generative model. It's a
-**deterministic agent** that follows the classic plan → act → observe → synthesize loop using
+It's a **deterministic agent** that follows the classic plan → act → observe → synthesize loop using
 hand-written rules instead of a language model doing the reasoning:
 
 1. **Plan** (`app/agent.py::plan`) — parses the question for keywords, EmpIDs, department names,
