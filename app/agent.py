@@ -21,7 +21,7 @@ PERF_LABELS = ["exceeds", "fully meets", "needs improvement", "pip"]
 
 
 def _contains(text: str, *needles: str) -> bool:
-    return any(n in text for n in needles)
+    return any(re.search(rf"\b{re.escape(n)}s?\b", text) for n in needles)
 
 
 POLICY_INTENTS = {
@@ -44,7 +44,7 @@ LEAVE_BALANCE_HINTS = [
 
 def _policy_queries(query: str) -> list[str]:
     q = query.lower()
-    matched = [name for name, keys in POLICY_INTENTS.items() if any(k in q for k in keys)]
+    matched = [name for name, keys in POLICY_INTENTS.items() if _contains(q, *keys)]
     if not matched:
         return [query]
     expanded = {
