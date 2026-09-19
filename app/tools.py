@@ -120,6 +120,22 @@ def estimate_bonus(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+LEAVE_ENTITLEMENT = {"privilege": 21, "casual": 8, "sick": 12}
+
+
+def leave_entitlement(record: dict[str, Any]) -> dict[str, Any]:
+    absences = float(record.get("Absences") or 0)
+    total = sum(LEAVE_ENTITLEMENT.values())
+    return {
+        "privilege_days": LEAVE_ENTITLEMENT["privilege"],
+        "casual_days": LEAVE_ENTITLEMENT["casual"],
+        "sick_days": LEAVE_ENTITLEMENT["sick"],
+        "total_annual_days": total,
+        "unplanned_absences_on_file": int(absences),
+        "leave_year_start": "1 April",
+    }
+
+
 def filter_employees(
     department: str | None = None,
     performance: str | None = None,

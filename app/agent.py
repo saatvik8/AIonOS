@@ -25,12 +25,21 @@ def _contains(text: str, *needles: str) -> bool:
 
 
 POLICY_INTENTS = {
-    "leave": ["leave", "absence", "casual", "sick", "privilege", "pl", "cl", "holiday", "parental", "bereavement"],
+    "leave": [
+        "leave", "absence", "casual", "sick", "privilege", "pl", "cl", "holiday", "parental",
+        "bereavement", "remaining", "days left", "days off", "work days", "workdays", "time off",
+        "pto", "vacation", "leave balance",
+    ],
     "bonus": ["bonus", "payout", "variable pay", "spot bonus", "referral"],
     "raise": ["raise", "merit", "salary review", "compensation cycle", "pay increase"],
     "promotion": ["promotion", "promote", "career ladder", "eligibility checklist"],
     "partner": ["partner", "vendor", "insurance", "helix", "learngrid", "payroll", "benefits"],
 }
+
+LEAVE_BALANCE_HINTS = [
+    "remaining", "days left", "how many days", "days do i have", "days off", "work days",
+    "workdays", "time off", "pto", "vacation", "leave balance", "how much leave",
+]
 
 
 def _policy_queries(query: str) -> list[str]:
@@ -104,8 +113,14 @@ def plan(query: str, role: str) -> list[dict[str, Any]]:
     # employee
     if _contains(q, "my bonus", "bonus estimate", "how much bonus", "my raise", "my salary", "my performance", "my absence", "my profile", "am i eligible"):
         steps.append({"tool": "my_profile", "args": {}})
-    for pq in _policy_queries(query):
-        steps.append({"tool": "search_policies", "args": {"query": pq}})
+    wants_leave_balance = _contains(q, *LEAVE_BALANCE_HINTS)
+    if wants_leave_balance:
+        # Numeric balance question ("remaining days", "how much leave do I have") - answer with
+        # the exact entitlement numbers instead of a raw policy-document dump.
+        steps.append({"tool": "leave_status", "args": {}})
+    else:
+        for pq in _policy_queries(query):
+            steps.append({"tool": "search_policies", "args": {"query": pq}})
     return steps
 
 
@@ -135,6 +150,11 @@ def run_tool(name: str, args: dict[str, Any], user: dict[str, Any]) -> Any:
         if not record:
             return None
         return {"profile": record, "bonus_estimate": tools.estimate_bonus(record)}
+    if name == "leave_status":
+        record = tools.find_employee(int(user["empid"]))
+        if not record:
+            return None
+        return tools.leave_entitlement(record)
     raise ValueError(name)
 
 
@@ -175,15 +195,21 @@ def synthesize(query: str, role: str, observations: list[dict[str, Any]], user: 
             if not data:
                 parts.append("No employees matched those filters in the HR file.")
             else:
-                header = "Promotion-ready employees (policy checklist: Active, Fully Meets/Exceeds, engagement ≥ 3.5, absences ≤ 12):" if tool == "promotion_candidates" else f"Matching employees ({len(data)} shown):"
+                shown = data[:6]
+                header = (
+                    f"Top {len(shown)} promotion-ready employees, out of {len(data)} that meet the checklist "
+                    "(Active, Fully Meets/Exceeds, engagement ≥ 3.5, absences ≤ 12), ranked by overall fit:"
+                    if tool == "promotion_candidates"
+                    else f"{len(data)} employee{'s' if len(data) != 1 else ''} matched — showing the top {len(shown)}:"
+                )
                 rows = []
-                for rec in data[:12]:
+                for rec in shown:
                     rows.append(
-                        f"- {rec['Employee_Name']} (EmpID {rec['EmpID']}), {rec['Position']}, {rec['Department']}, "
-                        f"${rec['Salary']:,} , {rec['PerformanceScore']}, absences {rec['Absences']}, "
-                        f"manager {rec['ManagerName']}"
+                        f"• {rec['Employee_Name']} — {rec['Position']}, {rec['Department']} (EmpID {rec['EmpID']})\n"
+                        f"   ${rec['Salary']:,} · {rec['PerformanceScore']} · {rec['Absences']} absences · manager {rec['ManagerName']}"
                     )
-                parts.append(header + "\n" + "\n".join(rows))
+                tail = f"\n…and {len(data) - len(shown)} more matching the same criteria." if len(data) > len(shown) else ""
+                parts.append(header + "\n" + "\n".join(rows) + tail)
 
         elif tool == "get_employee" and isinstance(data, dict):
             parts.append(
@@ -218,6 +244,21 @@ def synthesize(query: str, role: str, observations: list[dict[str, Any]], user: 
             else:
                 parts.append("You are not eligible for the annual bonus under current status or PIP rules. Spot bonuses may still apply after a PIP is closed.")
 
+        elif tool == "leave_status" and isinstance(data, dict):
+            parts.append(
+                f"Your annual leave entitlement: {data['privilege_days']} privilege leave days, "
+                f"{data['casual_days']} casual leave days, and {data['sick_days']} sick leave days "
+                f"({data['total_annual_days']} days total), on a leave year that starts "
+                f"{data['leave_year_start']}. "
+                + (
+                    f"You currently have {data['unplanned_absences_on_file']} unplanned absences on file this cycle. "
+                    "The HR system tracks that as one combined absence count rather than a running balance per leave "
+                    "type, so for your exact days remaining, check with your manager or HR."
+                    if data["unplanned_absences_on_file"]
+                    else "You have no unplanned absences on file this cycle."
+                )
+            )
+
         elif tool == "search_policies" and isinstance(data, list):
             if data:
                 snippet = _clean_policy_answer(query, data)
@@ -225,12 +266,18 @@ def synthesize(query: str, role: str, observations: list[dict[str, Any]], user: 
                     parts.append(snippet)
 
         elif tool == "search_employees" and isinstance(data, list) and data:
-            rows = []
-            for h in data[:5]:
-                meta = h.get("metadata") or {}
-                rows.append(f"- {meta.get('name')} ({meta.get('empid')}), {meta.get('position')}, {meta.get('department')}, {meta.get('performance')}")
-            parts.append("Most relevant HR records:\n" + "\n".join(rows))
-            parts.append(_trim(data[0].get("text", ""), 700))
+            if len(data) == 1:
+                meta = data[0].get("metadata") or {}
+                parts.append(
+                    f"{meta.get('name')} (EmpID {meta.get('empid')}) — {meta.get('position')}, "
+                    f"{meta.get('department')}, performance {meta.get('performance')}."
+                )
+            else:
+                rows = []
+                for h in data[:5]:
+                    meta = h.get("metadata") or {}
+                    rows.append(f"• {meta.get('name')} (EmpID {meta.get('empid')}) — {meta.get('position')}, {meta.get('department')}, {meta.get('performance')}")
+                parts.append("Closest-matching HR records:\n" + "\n".join(rows))
 
     if not parts:
         if role == "employee":
@@ -248,21 +295,47 @@ def synthesize(query: str, role: str, observations: list[dict[str, Any]], user: 
     return preface + "\n\n" + "\n\n".join(parts)
 
 
+def _clean_policy_text(body: str) -> str:
+    # Drop the synthetic ingest preamble.
+    body = re.sub(r"^AIONOS company policy document:.*?\n+", "", body, flags=re.S)
+    # Drop markdown heading markers ("## Heading" -> "Heading") - the heading is already
+    # shown separately, and raw "#" characters read as clutter in a chat bubble.
+    body = re.sub(r"(?m)^#{1,6}\s*", "", body)
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def _sentence_trim(text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    # Prefer to end on a full sentence rather than mid-word/mid-clause.
+    end = max(cut.rfind(". "), cut.rfind(".\n"))
+    if end > max_chars * 0.4:
+        return cut[: end + 1]
+    return cut.rstrip() + "…"
+
+
 def _clean_policy_answer(query: str, hits: list[dict[str, Any]]) -> str:
     blocks: list[str] = []
     seen = set()
     ranked = sorted(hits, key=lambda h: -float(h.get("score") or 0))
-    for hit in ranked[:4]:
+    # Two focused, well-scored snippets read better than four loosely related ones.
+    for hit in ranked[:2]:
         meta = hit.get("metadata") or {}
         key = (meta.get("source"), meta.get("heading"))
         if key in seen:
             continue
         seen.add(key)
-        body = hit.get("text", "")
-        body = re.sub(r"^AIONOS company policy document:.*?\n+", "", body, flags=re.S)
+        body = _clean_policy_text(hit.get("text", ""))
         heading = meta.get("heading") or meta.get("title") or "Policy"
         title = meta.get("title") or "AIONOS policy"
-        blocks.append(f"From {title} - {heading}:\n{body.strip()[:700]}")
+        # The cleaned body's first line is usually the heading again (from the markdown source) -
+        # drop it since it's already shown in the "From ... - heading:" line below.
+        first_line, _, rest = body.partition("\n")
+        if first_line.strip().lower() == str(heading).strip().lower() and rest.strip():
+            body = rest
+        blocks.append(f"From {title} - {heading}:\n{_sentence_trim(body, 500)}")
     return "\n\n".join(blocks)
 
 
